@@ -5,7 +5,10 @@ import numpy as np
 import pathlib
 from coco_parser import COCOParser
 import matplotlib.patches as patches
-
+import cv2
+from sklearn.metrics.pairwise import cosine_similarity
+from skimage.feature import hog
+from skimage import exposure
 
 #SolarPanelDataset class to load and preprocess images and annotations
 class SolarPanelDataset(tf.data.Dataset):
@@ -95,47 +98,261 @@ def assign_colour(class_name):
     else:
         return "blue"
 
-# function to visualize a random selection of images and their bounding boxes
-def visualize_random_samples(dataset, num_images=4):
+
+def edge_detection(img):
+    """Applies Canny edge detection on the image."""
+    img_uint8 = tf.image.convert_image_dtype(img, dtype=tf.uint8)
+    gray = cv2.cvtColor(img_uint8.numpy(), cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, threshold1=30, threshold2=100)
+    edges_colored = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
+    return edges_colored
+
+
+def flatten_image(image):
+    """Flatten the 2D image to a 1D vector."""
+    return image.flatten()
+
+def resize_to_match(image, target_shape):
+    """Resize the image to match the target shape."""
+    return cv2.resize(image, (target_shape[1], target_shape[0]))  # (height, width)
+
+def extract_hog_image(img):
+    """Extract and return the HOG visualization image from the RGB image."""
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    _, hog_image = hog(
+        gray,
+        orientations=9,
+        pixels_per_cell=(8, 8),
+        cells_per_block=(2, 2),
+        block_norm='L2-Hys',
+        visualize=True,
+        feature_vector=True
+    )
+    hog_image = exposure.rescale_intensity(hog_image, in_range=(0, 10))
+    return hog_image
+
+def extract_sift_features(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    # Initialize SIFT detector
+    sift = cv2.SIFT_create()
+
+    # Detect keypoints and descriptors
+    keypoints, descriptors = sift.detectAndCompute(gray, None)
+
+    # Draw the keypoints on the image (for visualization)
+    img_with_keypoints = cv2.drawKeypoints(img, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+
+    return img_with_keypoints
+
+def extract_orb_features(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    # Initialize ORB detector
+    orb = cv2.ORB_create()
+
+    # Detect keypoints and compute descriptors
+    keypoints, descriptors = orb.detectAndCompute(gray, None)
+
+    # Draw keypoints on the image
+    img_with_keypoints = cv2.drawKeypoints(img, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+
+    return img_with_keypoints
+
+def extract_fast_features(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    # Detect keypoints using FAST
+    fast = cv2.FastFeatureDetector_create()
+    keypoints = fast.detect(gray, None)
+
+    # Compute descriptors using BRIEF
+    brief = cv2.xfeatures2d.BriefDescriptorExtractor_create()
+    keypoints, descriptors = brief.compute(gray, keypoints)
+
+    # Draw keypoints on the image
+    img_with_keypoints = cv2.drawKeypoints(img, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+
+    return img_with_keypoints
+
+
+def visualize_edge_features(dataset, num_images=4):
     data_list = list(dataset.as_numpy_iterator())
-    # randomly pick 4 samples
     idxs = np.random.choice(len(data_list), num_images, replace=False)
-    # subplots for displaying images
-    fig, axs = plt.subplots(2, 2, figsize=(15, 10))
-    axs = axs.ravel()
+
+    fig, axs = plt.subplots(num_images, 2, figsize=(12, 4 * num_images))
+
     for i, idx in enumerate(idxs):
         img, targets = data_list[idx]
         boxes = targets['boxes']
-        labels = targets['labels']
         label_names = targets['label_names']
-        axs[i].imshow(img)
-        axs[i].axis('off')
-        for box, label_name in zip(boxes, label_names):
-            x_min, y_min, x_max, y_max = box
-            width = x_max - x_min
-            height = y_max - y_min
-            color = assign_colour(label_name.decode('utf-8'))
-            # rectangle for the bounding box
-            rect = patches.Rectangle(
-                (x_min, y_min),
-                width,
-                height,
-                linewidth=2,
-                edgecolor=color,
-                facecolor='none'
-            )
-            axs[i].add_patch(rect)
-            t_box= axs[i].text(
-                x_min,
-                y_min - 5,
-                label_name.decode('utf-8'),
-                color='red',
-                fontsize=8,
-                backgroundcolor='white'
-            )
-            t_box.set_bbox(dict(boxstyle='square, pad=0', facecolor='white', alpha=0.6,
-                                edgecolor='blue'))
+
+        img_np = (img * 255).astype(np.uint8)
+        edge_img = edge_detection(img)
+
+        for col, image in enumerate([img_np, edge_img]):
+            ax = axs[i, col] if num_images > 1 else axs[col]
+            ax.imshow(image)
+            ax.axis('off')
+            title = 'Original Image' if col == 0 else 'Edge Map'
+            ax.set_title(title)
+
+            for box, label in zip(boxes, label_names):
+                x_min, y_min, x_max, y_max = box
+                width, height = x_max - x_min, y_max - y_min
+                color = assign_colour(label.decode('utf-8'))
+                rect = patches.Rectangle((x_min, y_min), width, height,
+                                         linewidth=2, edgecolor=color, facecolor='none')
+                ax.add_patch(rect)
+                ax.text(x_min, y_min - 5, label.decode('utf-8'), fontsize=8, color='black',
+                        bbox=dict(facecolor='white', edgecolor=color, boxstyle='round,pad=0.2'))
+
     plt.tight_layout()
     plt.show()
 
-visualize_random_samples(train_ds, num_images=4)
+visualize_edge_features(train_ds, num_images=4)
+
+def visualize_hog_features(dataset, num_images=4):
+    data_list = list(dataset.as_numpy_iterator())
+    idxs = np.random.choice(len(data_list), num_images, replace=False)
+
+    fig, axs = plt.subplots(num_images, 2, figsize=(12, 4 * num_images))
+
+    for i, idx in enumerate(idxs):
+        img, targets = data_list[idx]
+        boxes = targets['boxes']
+        label_names = targets['label_names']
+
+        img_np = (img * 255).astype(np.uint8)
+        hog_img = extract_hog_image(img_np)
+
+        for col, image in enumerate([img_np, hog_img]):
+            ax = axs[i, col] if num_images > 1 else axs[col]
+            cmap = None if col == 0 else 'gray'
+            ax.imshow(image, cmap=cmap)
+            ax.axis('off')
+            ax.set_title('Original Image' if col == 0 else 'HOG Visualization')
+
+            for box, label in zip(boxes, label_names):
+                x_min, y_min, x_max, y_max = box
+                width = x_max - x_min
+                height = y_max - y_min
+                color = assign_colour(label.decode('utf-8'))
+                rect = patches.Rectangle((x_min, y_min), width, height,
+                                         linewidth=2, edgecolor=color, facecolor='none')
+                ax.add_patch(rect)
+                ax.text(x_min, y_min - 5, label.decode('utf-8'), fontsize=8, color='black',
+                        bbox=dict(facecolor='white', edgecolor=color, boxstyle='round,pad=0.2'))
+
+    plt.tight_layout()
+    plt.show()
+
+visualize_hog_features(train_ds, num_images=4)
+
+
+def visualize_sift_features(dataset, num_images=4):
+    data_list = list(dataset.as_numpy_iterator())
+    idxs = np.random.choice(len(data_list), num_images, replace=False)
+
+    fig, axs = plt.subplots(num_images, 2, figsize=(12, 4 * num_images))
+
+    for i, idx in enumerate(idxs):
+        img, targets = data_list[idx]
+        boxes = targets['boxes']
+        label_names = targets['label_names']
+
+        img_np = (img * 255).astype(np.uint8)
+        sift_img = extract_sift_features(img_np)
+
+        for col, image in enumerate([img_np, sift_img]):
+            ax = axs[i, col] if num_images > 1 else axs[col]
+            ax.imshow(image)
+            ax.axis('off')
+            title = 'Original Image' if col == 0 else 'SIFT Keypoints'
+            ax.set_title(title)
+
+            for box, label in zip(boxes, label_names):
+                x_min, y_min, x_max, y_max = box
+                width, height = x_max - x_min, y_max - y_min
+                color = assign_colour(label.decode('utf-8'))
+                rect = patches.Rectangle((x_min, y_min), width, height,
+                                         linewidth=2, edgecolor=color, facecolor='none')
+                ax.add_patch(rect)
+                ax.text(x_min, y_min - 5, label.decode('utf-8'), fontsize=8, color='black',
+                        bbox=dict(facecolor='white', edgecolor=color, boxstyle='round,pad=0.2'))
+
+    plt.tight_layout()
+    plt.show()
+
+visualize_sift_features(train_ds, num_images=4)
+
+def visualize_orb_features(dataset, num_images=4):
+    data_list = list(dataset.as_numpy_iterator())
+    idxs = np.random.choice(len(data_list), num_images, replace=False)
+
+    fig, axs = plt.subplots(num_images, 2, figsize=(12, 4 * num_images))
+
+    for i, idx in enumerate(idxs):
+        img, targets = data_list[idx]
+        boxes = targets['boxes']
+        label_names = targets['label_names']
+
+        img_np = (img * 255).astype(np.uint8)
+        orb_img = extract_orb_features(img_np)
+
+        for col, image in enumerate([img_np, orb_img]):
+            ax = axs[i, col] if num_images > 1 else axs[col]
+            ax.imshow(image)
+            ax.axis('off')
+            ax.set_title('Original Image' if col == 0 else 'ORB Features')
+
+            for box, label in zip(boxes, label_names):
+                x_min, y_min, x_max, y_max = box
+                width, height = x_max - x_min, y_max - y_min
+                color = assign_colour(label.decode('utf-8'))
+                rect = patches.Rectangle((x_min, y_min), width, height,
+                                         linewidth=2, edgecolor=color, facecolor='none')
+                ax.add_patch(rect)
+                ax.text(x_min, y_min - 5, label.decode('utf-8'), fontsize=8, color='black',
+                        bbox=dict(facecolor='white', edgecolor=color, boxstyle='round,pad=0.2'))
+
+    plt.tight_layout()
+    plt.show()
+
+visualize_orb_features(train_ds, num_images=4)
+
+def visualize_fast_features(dataset, num_images=4):
+    data_list = list(dataset.as_numpy_iterator())
+    idxs = np.random.choice(len(data_list), num_images, replace=False)
+
+    fig, axs = plt.subplots(num_images, 2, figsize=(12, 4 * num_images))
+
+    for i, idx in enumerate(idxs):
+        img, targets = data_list[idx]
+        boxes = targets['boxes']
+        label_names = targets['label_names']
+
+        img_np = (img * 255).astype(np.uint8)
+        fast_img = extract_fast_features(img_np)
+
+        for col, image in enumerate([img_np, fast_img]):
+            ax = axs[i, col] if num_images > 1 else axs[col]
+            ax.imshow(image)
+            ax.axis('off')
+            ax.set_title('Original Image' if col == 0 else 'FAST + BRIEF Features')
+
+            for box, label in zip(boxes, label_names):
+                x_min, y_min, x_max, y_max = box
+                width, height = x_max - x_min, y_max - y_min
+                color = assign_colour(label.decode('utf-8'))
+                rect = patches.Rectangle((x_min, y_min), width, height,
+                                         linewidth=2, edgecolor=color, facecolor='none')
+                ax.add_patch(rect)
+                ax.text(x_min, y_min - 5, label.decode('utf-8'), fontsize=8, color='black',
+                        bbox=dict(facecolor='white', edgecolor=color, boxstyle='round,pad=0.2'))
+
+    plt.tight_layout()
+    plt.show()
+
+visualize_fast_features(train_ds, num_images=4)
+
